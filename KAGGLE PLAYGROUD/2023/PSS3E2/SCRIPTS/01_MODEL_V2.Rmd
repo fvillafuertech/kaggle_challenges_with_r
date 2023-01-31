@@ -1,0 +1,305 @@
+---
+title: "KPS: S3E2 - Modeling V1"
+output: html_document
+date: "2023-01-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+library(tidymodels)
+library(fastDummies)
+library(vip)
+library(bonsai)
+library(doParallel)
+
+registerDoParallel()
+
+theme_set(theme_light() + 
+            theme(legend.position = "bottom"))
+```
+
+## FUNCIONES
+
+```{r}
+bi_col <- function(data, variable_1, variable_2){
+  data %>% 
+    count({{variable_1}}, {{variable_2}}) %>% 
+    group_by({{variable_1}}) %>% 
+    mutate(prop = n/sum(n), 
+           text = percent(prop)) %>% 
+    ungroup() %>% 
+    ggplot(aes(as.character({{variable_1}}), 
+               prop, 
+               fill = as.character({{variable_2}}))) + 
+    geom_col() + 
+    geom_text(aes(label = text), 
+              position = position_stack(vjust = 0.5))
+}
+```
+
+## CARGANDO DATOS
+
+```{r}
+dataset <- read_csv("DATA/train.csv") %>% 
+  janitor::clean_names()
+test <- read_csv("DATA/test.csv") %>% 
+  janitor::clean_names()
+dfSubmission <- read_csv("DATA/sample_submission.csv")
+```
+
+- DICCIONARIO: 
+1) id: unique identifier
+2) gender: "Male", "Female" or "Other"
+3) age: age of the patient
+4) hypertension: 0 if the patient doesn't have hypertension, 1 if the patient has hypertension
+5) heart_disease: 0 if the patient doesn't have any heart diseases, 1 if the patient has a heart disease
+6) ever_married: "No" or "Yes"
+7) work_type: "children", "Govt_jov", "Never_worked", "Private" or "Self-employed"
+8) Residence_type: "Rural" or "Urban"
+9) avg_glucose_level: average glucose level in blood
+10) bmi: body mass index
+11) smoking_status: "formerly smoked", "never smoked", "smokes" or "Unknown"*
+12) stroke: 1 if the patient had a stroke or 0 if not
+
+## META - ANÁLISIS
+
+```{r}
+df_status(dataset, print_results = FALSE)
+df_status(test, print_results = FALSE)
+```
+
+## PREPARACIÓN DE DATOS
+
+```{r}
+dataset_p <- dataset %>% 
+  mutate(stroke = factor(stroke, 
+                         levels = c(1, 0), 
+                         labels = c(1, 0)), 
+         ever_married = ifelse(ever_married == "Yes", 1, 0)) %>% 
+  dummy_cols(select_columns = c("gender", 
+                                "work_type", 
+                                "residence_type", 
+                                "smoking_status"), 
+             remove_first_dummy = TRUE, 
+             remove_selected_columns = TRUE) %>% 
+  janitor::clean_names()
+
+test_p <- test %>% 
+  mutate(ever_married = ifelse(ever_married == "Yes", 1, 0)) %>% 
+  dummy_cols(select_columns = c("gender", 
+                                "work_type", 
+                                "residence_type", 
+                                "smoking_status"), 
+             remove_first_dummy = TRUE, 
+             remove_selected_columns = TRUE) %>% 
+  janitor::clean_names()
+
+## DEFINICION DE DATA DE ENTRENAMIENTO Y PRUEBA
+particion_inicial <- initial_split(dataset_p, prop = 0.80, strata = stroke)
+dfTrain <- training(particion_inicial)
+dfTest <- testing(particion_inicial)
+
+## DEFINICION DE DATA PARA VALIDACIÓN CRUZADA
+folds <- vfold_cv(dfTrain, v = 5, strata = stroke)
+
+```
+
+## CONSTRUCCIÓN DE MODELOS BASELINE
+
+```{r}
+formula <- glue::glue("stroke ~ {dfTrain %>% 
+  select(-id, - stroke) %>% 
+  colnames() %>% 
+  paste(collapse = ' + ')}") %>% 
+  as.formula()
+```
+
+### Random Forest
+
+```{r}
+rf_spec <- rand_forest(trees = 1000) %>% 
+  set_engine("ranger", 
+             seed = 42, 
+             num.threads = 6, 
+             verbose = TRUE, 
+             importance = "impurity") %>% 
+  set_mode("classification")
+
+rf_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(rf_spec)
+
+rf_fit <- rf_wf %>% 
+  fit(dfTrain)
+
+rf_fit %>% 
+  extract_fit_engine() %>% 
+  vip()
+```
+
+- De acuerdo a la importancia de variables se aprecia que la edad, el nivel promedio de glucosa y el IMC están mas involucrados en la predictibilidad de un infarto cerebral.
+
+```{r}
+dfPredictRf <- rf_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$stroke)
+
+caret::confusionMatrix(dfPredictRf$.pred_class, dfPredictRf$real)
+
+dfPredictProbRf <- rf_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$stroke)
+
+dfPredictProbRf %>% 
+  roc_auc(real,  .pred_1)
+
+dfPredictProbRf %>% 
+  roc_curve(real, .pred_1) %>% 
+  autoplot()
+```
+
+### XGBoost
+
+```{r}
+set.seed(42)
+
+xgb_spec <- boost_tree(trees = 1000) %>% 
+  set_engine("xgboost", 
+             verbose = 1) %>% 
+  set_mode("classification")
+
+xgb_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(xgb_spec)
+
+xgb_fit <- xgb_wf %>% 
+  fit(dfTrain)
+
+xgb_fit %>% 
+  extract_fit_engine() %>% 
+  vip()
+```
+
+```{r}
+dfPredictXgb <- xgb_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$stroke)
+
+caret::confusionMatrix(dfPredictXgb$.pred_class, dfPredictXgb$real)
+
+dfPredictProbXgb <- xgb_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$stroke)
+
+roc_auc(dfPredictProbXgb, real, .pred_1)
+roc_curve(dfPredictProbXgb, real, .pred_1) %>% 
+  autoplot()
+
+```
+
+### LightGBM
+
+```{r}
+lgbm_spec <- boost_tree(trees = 1000) %>% 
+  set_engine("lightgbm", 
+             verbose = 2, 
+             seed = 42) %>% 
+  set_mode("classification")
+
+lgbm_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(lgbm_spec)
+
+lgbm_fit <- lgbm_wf %>% 
+  fit(dfTrain)
+
+lgbm_fit %>% 
+  extract_fit_engine() %>% 
+  lightgbm::lgb.importance() %>% 
+  lightgbm::lgb.plot.importance()
+```
+
+```{r}
+dfPredictLgbm <- lgbm_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$stroke)
+
+caret::confusionMatrix(dfPredictLgbm$.pred_class, dfPredictLgbm$real)
+
+dfPredictProbLgbm <- lgbm_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$stroke)
+
+roc_auc(dfPredictProbLgbm, real, .pred_1)
+
+roc_curve(dfPredictProbLgbm, real, .pred_1) %>% 
+  autoplot()
+```
+
+## TUNEO DE MODELOS Y VALIDACIÓN CRUZADA
+
+```{r}
+rf_spec_tune <- rand_forest(trees = tune(), 
+                           mtry = tune()) %>% 
+  set_engine("ranger", 
+             seed = 42, 
+             verbose = TRUE) %>% 
+  set_mode("classification")
+
+rf_wf_tune <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(rf_spec_tune)
+
+rf_fit_tune <- tune_grid(rf_wf_tune, 
+                         resamples = folds, 
+                         grid = crossing(trees = c(10, 50, 100, 200, 500, 1000), 
+                                         mtry = c(2, 4, 6, 10, 12, 14, 16)), 
+                         metrics = metric_set(accuracy, roc_auc), 
+                         control = control_grid(verbose = TRUE, save_pred = FALSE))
+
+rf_fit_tune %>% 
+  autoplot()
+
+select_best(rf_fit_tune, metric = "roc_auc")
+show_best(rf_fit_tune, metric = "roc_auc")
+```
+
+```{r}
+rf_fit_final <- rf_wf_tune %>% 
+  finalize_workflow(select_best(rf_fit_tune, metric = "roc_auc")) %>% 
+  fit(dfTrain)
+```
+
+
+## PREDICCIÓN Y SUBMIT
+
+```{r}
+rf_fit_final %>% 
+  predict(test_p, type = "prob") %>% 
+  mutate(id = test_p$id) %>% 
+  select(id, stroke = .pred_1) %>% 
+  write_csv("OUTPUTS/SUBMIT_V2.csv")
+
+xgb_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  mutate(id = test_p$id) %>% 
+  select(id, stroke = .pred_1) %>% 
+  write_csv("OUTPUTS/SUBMIT_V1.csv")
+
+lgbm_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  mutate(id = test_p$id) %>% 
+  select(id, stroke = .pred_1) %>% 
+  write_csv("OUTPUTS/SUBMIT_V1.csv")
+```
+
+

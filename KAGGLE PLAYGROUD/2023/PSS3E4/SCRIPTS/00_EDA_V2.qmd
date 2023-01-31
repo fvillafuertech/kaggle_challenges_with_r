@@ -1,0 +1,139 @@
+---
+title: "PSS3E4: EDA V2"
+format: html
+---
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+library(patchwork)
+
+theme_set(theme_light())
+```
+
+## CARGANDO DATA
+
+```{r}
+dataset <- read_csv("DATA/train.csv")
+dataset_test <- read_csv("DATA/test.csv")
+submit <- read_csv("DATA/sample_submission.csv")
+```
+
+## META - ANÁLISIS
+
+```{r}
+df_status(dataset, print_results = FALSE)
+df_status(dataset_test, print_results = FALSE)
+
+```
+
+- En general se aprecia que se tiene un desbalanceo importante en la target.
+- Sin problemas de missings.
+
+## PREPARACIÓN DE DATOS PARA ANÁLISIS
+
+```{r}
+dataset_p <- dataset %>% 
+  janitor::clean_names() %>% 
+  mutate(class = factor(class, levels = c(1, 0), labels = c(1, 0)))
+
+variables_numericas <- dataset_p %>% 
+  select(-id) %>% 
+  select_if(is.numeric) %>% 
+  colnames()
+
+```
+
+
+## ANÁLISIS EXPLORATORIO DE DATOS
+
+```{r}
+dataset_p %>% 
+  mutate(amount = scale(amount)[, 1]) %>% 
+  select(contains(c("v", "amount"))) %>% 
+  skimr::skim()
+
+dataset_p %>% 
+  select(-time) %>% 
+  ggplot(aes(v1)) + 
+  geom_histogram()
+
+
+lista_histogramas <- list()
+
+for(i in 1:length(variables_numericas)){
+  lista_histogramas[[i]] <- dataset_p %>% 
+    ggplot(aes(!!rlang::sym(variables_numericas[i]))) + 
+    geom_histogram()
+}
+
+lista_histogramas %>% 
+  patchwork::wrap_plots()
+
+dataset_p %>% 
+  ggplot(aes(amount, ..count../sum(..count..), fill = class)) + 
+  geom_histogram(position = "stack", alpha = 0.7)
+
+dataset_p %>% 
+  ggplot(aes(amount, fill = class)) + 
+  geom_ribbon()
+
+ggplot() + 
+  geom_histogram(data = dataset_p %>% filter(class == "1"), aes(x = amount, y = ..density..), 
+                 fill = "firebrick") + 
+  geom_histogram(data = dataset_p %>% filter(class == "0"), aes(x = amount, y = -..density..), 
+                 fill = "steelblue")
+
+dataset_p %>% 
+  ggplot(aes(amount, fill = class)) + 
+  geom_histogram(position = "fill")
+
+dataset_p %>% 
+  ggplot(aes(amount, fill = class)) + 
+  geom_density(position = "fill")
+
+dataset_p %>% 
+  select(time, contains("v"), amount) %>% 
+  cor(method = "spearman") %>% 
+  as.data.frame() %>% 
+  rownames_to_column("V1") %>% 
+  pivot_longer(cols = -V1, 
+               names_to = "V2", 
+               values_to = "cor") %>% 
+  ggplot(aes(V1, V2, fill = cor)) + 
+  geom_tile() + 
+  geom_text(aes(label = round(cor, 2)),
+            size = 3) + 
+  scale_fill_gradient2(low = "steelblue", 
+                       mid = "white", 
+                       high = "firebrick", 
+                       limits = c(-1, 1)) + 
+  theme(axis.title = element_blank(), 
+        axis.ticks = element_blank(), 
+        legend.position = "bottom", 
+        panel.border = element_blank())
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

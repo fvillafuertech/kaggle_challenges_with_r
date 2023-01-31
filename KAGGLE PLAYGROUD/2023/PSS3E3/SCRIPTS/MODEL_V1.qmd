@@ -1,0 +1,290 @@
+---
+title: "PSS3E3: MODELING V1"
+format: html
+---
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+library(tidymodels)
+library(bonsai)
+library(vip)
+library(fastDummies)
+
+theme_set(theme_light() + 
+            theme(legend.position = "bottom"))
+```
+
+## CARGANDO DATOS
+
+```{r}
+dataset <- read_csv("DATA/train.csv")
+dataset_test <- read_csv("DATA/test.csv")
+submit_sample <- read_csv("DATA/sample_submission.csv")
+```
+
+## META - ANÁLISIS
+
+```{r}
+dfStatusDataset <- df_status(dataset, print_results = FALSE)
+dfStatusDatasetT <- df_status(dataset_test, print_results = FALSE)
+
+dfStatusDataset %>% 
+  filter(q_na > 0)
+dfStatusDatasetT %>% 
+  filter(q_na > 0)
+
+dfStatusDataset %>% 
+  filter(unique == 1)
+
+dfStatusDatasetT %>% 
+  filter(unique == 1)
+
+variable_to_remove <- dfStatusDataset %>% 
+  filter(unique == 1) %>% 
+  pull(variable)
+
+variables_numericas <- dfStatusDataset %>% 
+  filter(type == "numeric", 
+         !variable %in% c("id", "Education", "EnvironmentSatisfaction", 
+                          "JobInvolvement", "JobLevel", "JobSatisfaction", 
+                          "PerformanceRating", "RelationshipSatisfaction", 
+                          "StockOptionLevel", "WorkLifeBalance", "Attrition", 
+                          variable_to_remove)) %>% 
+  pull(variable) %>% 
+  janitor::make_clean_names()
+
+variables_categoricas <- c("BusinessTravel", "Department", "EducationField", 
+                           "Gender", "JobRole", "MaritalStatus", "OverTime")
+```
+
+- No se tienen datos faltantes en primera instancia.
+- Se tienen 3 variables que tienen 1 único valor, siendo las mismas para el conjunto de datos de entrenamiento como el de prueba, estas se proceden a eliminarse en la preparación de datos.
+- Se cuenta con más variables numéricas que categóricas.
+
+## PREPARACIÓN DE DATOS PARA MODELAMIENTO
+
+```{r}
+set.seed(2023)
+dataset_p <- dataset %>% 
+  select(-all_of(variable_to_remove)) %>% 
+  mutate(Attrition = factor(Attrition, levels = c(1, 0), labels = c(1, 0))) %>% 
+  dummy_cols(select_columns = variables_categoricas, 
+             remove_first_dummy = TRUE, 
+             remove_selected_columns = TRUE) %>% 
+  janitor::clean_names() %>% 
+  ## LIMPIEZA DE DATOS (BASADA EN EDA V1)
+  filter(daily_rate <= 1500, 
+         education <= 5, 
+         job_level <= 5)
+
+test_p <- dataset_test %>% 
+  select(-all_of(variable_to_remove)) %>% 
+  dummy_cols(select_columns = variables_categoricas, 
+             remove_first_dummy = TRUE, 
+             remove_selected_columns = TRUE) %>% 
+  janitor::clean_names() %>% 
+  ## LIMPIEZA DE DATOS (BASADA EN EDA V1)
+  filter(daily_rate <= 1500, 
+         education <= 5, 
+         job_level <= 5)
+
+particion_inicial <- initial_split(dataset_p, prop = 0.8, strata = attrition)
+
+dfTrain <- training(particion_inicial)
+dfTest <- testing(particion_inicial)
+
+folds <- vfold_cv(dfTrain, v = 5, strata = attrition)
+```
+
+## MODELAMIENTO (BASELINE)
+
+```{r}
+formula <- glue::glue("attrition ~ {dfTrain %>% 
+    select(-id, -attrition) %>% 
+    colnames() %>% 
+    paste(collapse = ' + ')}") %>% 
+  as.formula()
+```
+
+### C50
+
+```{r}
+c50_spec <- boost_tree(trees = 100) %>% 
+  set_engine("C5.0") %>% 
+  set_mode("classification")
+
+c50_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(c50_spec)
+
+c50_fit <- c50_wf %>% 
+  fit(dfTrain)
+```
+
+```{r}
+dfPredictC50 <- c50_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$attrition)
+
+caret::confusionMatrix(dfPredictC50$.pred_class, dfPredictC50$real)
+
+dfPredictProbC50 <- c50_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$attrition)
+
+roc_auc(dfPredictProbC50, real, .pred_1)
+roc_curve(dfPredictProbC50, real, .pred_1) %>% 
+  autoplot()
+
+```
+
+### Random Forest
+
+```{r}
+rf_spec <- rand_forest(trees = 1000) %>% 
+  set_engine("ranger", 
+             num.threads = 6, 
+             verbose = TRUE, 
+             seed = 2023) %>% 
+  set_mode("classification")
+
+rf_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(rf_spec)
+
+rf_fit <- rf_wf %>% 
+  fit(dfTrain)
+```
+
+```{r}
+dfPredictRf <- rf_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$attrition)
+
+caret::confusionMatrix(dfPredictRf$.pred_class, dfPredictRf$real)
+
+dfPredictProbRf <- rf_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$attrition)
+
+roc_auc(dfPredictProbRf, real, .pred_1)
+
+roc_curve(dfPredictProbRf, real, .pred_1) %>% 
+  autoplot()
+```
+
+### XGBoost
+
+```{r}
+set.seed(2023)
+
+xgb_spec <- boost_tree(trees = 1000) %>% 
+  set_engine("xgboost", 
+             nthread = 6, 
+             verbose = 1) %>% 
+  set_mode("classification")
+
+xgb_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(xgb_spec)
+
+xgb_fit <- xgb_wf %>% 
+  fit(dfTrain)
+```
+
+```{r}
+dfPredictXgb <- xgb_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$attrition)
+
+caret::confusionMatrix(dfPredictXgb$.pred_class, dfPredictXgb$real)
+
+dfPredictProbXgb <- xgb_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$attrition)
+
+roc_auc(dfPredictProbXgb, real, .pred_1)
+
+roc_curve(dfPredictProbXgb, real, .pred_1) %>% 
+  autoplot()
+```
+
+### LightGBM
+
+```{r}
+lgbm_spec <- boost_tree(trees = 1000) %>% 
+  set_engine("lightgbm", 
+             num_threads = 6, 
+             verbose = 2, 
+             seed = 2023) %>% 
+  set_mode("classification")
+
+lgbm_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(lgbm_spec)
+
+lgbm_fit <- lgbm_wf %>% 
+  fit(dfTrain)
+```
+
+```{r}
+dfPredictLgbm <- lgbm_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$attrition)
+
+caret::confusionMatrix(dfPredictLgbm$.pred_class, dfPredictLgbm$real)
+
+dfPredictProbLgbm <- lgbm_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$attrition)
+
+roc_auc(dfPredictProbLgbm, real, .pred_1)
+
+roc_curve(dfPredictProbLgbm, real, .pred_1) %>% 
+  autoplot()
+```
+
+## PREDICCIÓN FINAL Y SUBMIT
+
+```{r}
+## Random Forest
+dfPredictRfF <- rf_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  transmute(id = test_p$id, 
+            Attrition = .pred_1)
+
+submit_sample %>% 
+  select(-Attrition) %>% 
+  left_join(dfPredictRfF, by = c("id" = "id")) %>% 
+  write_csv("OUTPUTS/SUBMIT_V1.1_rf.csv", quote = "none")
+
+## XGBoost
+dfPredictXgbF <- xgb_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  transmute(id = test_p$id, 
+            Attrition = .pred_1)
+
+submit_sample %>% 
+  select(-Attrition) %>% 
+  left_join(dfPredictXgbF, by = c("id" = "id")) %>% 
+  write_csv("OUTPUTS/SUBMIT_V1_xgb.csv", quote = "none")
+
+## LightGBM
+dfPredictLgbmF <- lgbm_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  transmute(id = test_p$id, 
+            Attrition = .pred_1)
+
+submit_sample %>% 
+  select(-Attrition) %>% 
+  left_join(dfPredictLgbmF, by = c("id" = "id")) %>% 
+  write_csv("OUTPUTS/SUBMIT_V1.csv", quote = "none")
+
+```
+
+

@@ -1,0 +1,596 @@
+---
+title: "PSS3E3: EDA V2"
+format: html
+---
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+library(factoextra)
+
+theme_set(theme_light() + 
+            theme(legend.position = "bottom"))
+```
+
+## CARGANDO DATOS
+
+```{r}
+dataset <- read_csv("DATA/train.csv")
+dataset_test <- read_csv("DATA/test.csv")
+submit_sample <- read_csv("DATA/sample_submission.csv")
+```
+
+## META - ANÁLISIS
+
+```{r}
+dfStatusDataset <- df_status(dataset, print_results = FALSE)
+dfStatusDatasetT <- df_status(dataset_test, print_results = FALSE)
+
+dfStatusDataset %>% 
+  filter(q_na > 0)
+dfStatusDatasetT %>% 
+  filter(q_na > 0)
+
+dfStatusDataset %>% 
+  filter(unique == 1)
+
+dfStatusDatasetT %>% 
+  filter(unique == 1)
+
+variable_to_remove <- dfStatusDataset %>% 
+  filter(unique == 1) %>% 
+  pull(variable)
+
+variables_numericas <- dfStatusDataset %>% 
+  filter(type == "numeric", 
+         !variable %in% c("id", "Education", "EnvironmentSatisfaction", 
+                          "JobInvolvement", "JobLevel", "JobSatisfaction", 
+                          "PerformanceRating", "RelationshipSatisfaction", 
+                          "StockOptionLevel", "WorkLifeBalance", "Attrition", 
+                          variable_to_remove)) %>% 
+  pull(variable) %>% 
+  janitor::make_clean_names()
+
+variables_categoricas <- c("BusinessTravel", "Department", "EducationField", 
+                           "Gender", "JobRole", "MaritalStatus", "OverTime")
+```
+
+- No se tienen datos faltantes en primera instancia.
+- Se tienen 3 variables que tienen 1 único valor, siendo las mismas para el conjunto de datos de entrenamiento como el de prueba, estas se proceden a eliminarse en la preparación de datos.
+- Se cuenta con más variables numéricas que categóricas.
+
+## PREPARACIÓN DE DATOS PARA MODELAMIENTO
+
+```{r}
+set.seed(2023)
+dataset_p <- dataset %>% 
+  select(-all_of(variable_to_remove)) %>% 
+  mutate(Attrition = factor(Attrition, levels = c(1, 0), labels = c(1, 0))) %>% 
+  # dummy_cols(select_columns = variables_categoricas, 
+  #            remove_first_dummy = TRUE, 
+  #            remove_selected_columns = TRUE) %>% 
+  janitor::clean_names() %>%
+  ## LIMPIEZA DE DATOS (BASADA EN EDA V1)
+  filter(daily_rate <= 1500, 
+         education <= 5, 
+         job_level <= 5)
+
+```
+
+## ANÁLISIS EXPLORATORIO DE DATOS
+
+### Análisis Univariado
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(age)) + 
+  geom_histogram() + 
+  geom_vline(aes(xintercept = mean(age)), 
+             col = "red", 
+             lty = 2) + 
+  geom_vline(aes(xintercept = median(age)), 
+             col = "steelblue", 
+             lty = 3) + 
+  labs(title = "Distribución de la Edad de Empleados", 
+       x = "Edad", 
+       y = "Recuento")
+
+skimr::skim(dataset_p, age)
+```
+
+- Distribución ligeramente asimétrica.
+- El 75% de personas tiene hasta 41 años de edad.
+- Un 50% de personas tiene entre 30 y 41 años de edad.
+
+```{r}
+dataset_p %>% 
+  count(business_travel) %>% 
+  mutate(prop = n/sum(n), 
+         business_travel = fct_reorder(business_travel, prop)) %>% 
+  ggplot(aes(prop, business_travel)) + 
+  geom_col(fill = "steelblue") + 
+  geom_text(aes(label = percent(prop)), 
+            hjust = -0.1) + 
+  labs(title = "Distribución de Empleados según Frecuencia de Viajes de Negocio", 
+       x = "% de empleados", 
+       y = "Frecuencia de Viajes") + 
+  scale_x_continuous(labels = percent_format())
+```
+
+- La mayoría de empleados viaja raras veces (76.9%)
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(daily_rate)) + 
+  geom_histogram() + 
+  labs(title = "Distribución de Ratio Diario", 
+       x = "Ratio diario", 
+       y = "Recuento")
+
+dataset_p %>% 
+  ggplot(aes(daily_rate)) + 
+  geom_boxplot() + 
+  labs(title = "Distribución de Ratio Diario")
+
+skimr::skim(dataset_p, daily_rate)
+```
+
+- La distribución presenta un valor atípico, siendo este cercano a 4000.
+
+```{r}
+dataset_p %>% 
+  count(department) %>% 
+  mutate(prop = n/sum(n), 
+         department = fct_reorder(department, prop)) %>% 
+  ggplot(aes(prop, department)) + 
+  geom_col() + 
+  labs(title = "Distribución de Empleados", 
+       x = "% de empleados") + 
+  scale_x_continuous(labels = percent_format())
+```
+
+- La mayoría de empleados pertenece al departamento de investigación y desarrollo.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(distance_from_home)) + 
+  geom_histogram() + 
+  labs(title = "Distribución de la Distancia del Trabajo a Casa del Empleado", 
+       x = "Distancia desde Casa", 
+       y = "Recuento")
+
+skimr::skim(dataset_p, distance_from_home)
+```
+
+- La mayoría vive cerca del lugar de trabajo.
+
+```{r}
+dataset_p %>% 
+  count(education) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría tiene un nivel educativo bajo-regular
+- Contrastando con la data original, no existe registro de nivel educativo 15, este dato debe ser omitido.
+
+```{r}
+dataset_p %>% 
+  count(education_field, sort = TRUE) %>% 
+  mutate(prop = n/sum(n), 
+         education_field = fct_reorder(education_field, prop)) %>% 
+  ggplot(aes(prop, education_field)) + 
+  geom_col(fill = "steelblue") + 
+  labs(title = "Distribución de Empleados según Campo de Educación", 
+       x = "% de Empleados", 
+       y = "Campo Educativo") + 
+  scale_x_continuous(labels = percent_format())
+```
+
+- La mayoría está conformada por ciencias de la vida y medica.
+
+```{r}
+dataset_p %>% 
+  count(environment_satisfaction) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría de empleados tiene un nivel de satisfacción entre 3 y 4 en cuanto al ambiente laboral.
+
+```{r}
+dataset_p %>% 
+  count(gender) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- Mayoría de varones en la muestra de trabajadores.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(hourly_rate)) + 
+  geom_histogram() + 
+  labs(title = "Distribución de Ratio de Horas de Trabajo", 
+       x = "Ratio de Horas", 
+       y = "Recuento")
+
+skimr::skim(dataset_p, hourly_rate)
+
+ks.test(dataset_p$hourly_rate, 
+        "pnorm", 
+        mean(dataset_p$hourly_rate), 
+        sd(dataset_p$hourly_rate))
+```
+
+- No existe evidencia estadística suficiente para afirmar, que con un 5% de significancia, el ratio de horas proviene de una distribución normal.
+- No todos los colaboradores cumplen el 100% de horas de trabajo, el promedio cumple con un 68%.
+
+```{r}
+dataset_p %>% 
+  count(job_involvement) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría sí se mantiene involucrado en el trabajo.
+
+```{r}
+dataset_p %>% 
+  count(job_level) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría tiene un nivel bajo de trabajo
+
+```{r}
+dataset_p %>% 
+  count(job_role) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- Se destaca unicamente los roles de científico de investigación y ejecutivos de venta.
+
+```{r}
+dataset_p %>% 
+  count(job_satisfaction) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría tiene un nivel de satisfacción laboral entre 3 y 4
+
+```{r}
+dataset_p %>% 
+  count(marital_status, sort = TRUE) %>% 
+  mutate(prop = n/sum(n))
+
+```
+
+- Aprox. la mitad de empleados son casados.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(monthly_income)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, monthly_income)
+```
+
+- El 50% de empleados gana desde 1010 hasta 4834 dólares al mes.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(monthly_rate)) + 
+  geom_histogram()
+
+dataset_p %>% 
+  ggplot(aes(monthly_rate)) + 
+  geom_boxplot()
+
+skimr::skim(dataset_p, monthly_rate)
+
+dataset_p$monthly_rate %>% 
+  ks.test("pnorm", mean(.), sd(.))
+```
+
+- Sin presencia de distribución normal, el promedio de ratio mensual es de 14770.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(num_companies_worked)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, num_companies_worked)
+```
+
+- La mayoría ha trabajado en al menos una compañia.
+
+```{r}
+dataset_p %>% 
+  count(over_time) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría no ha trabajado a horas fuera de oficina (76%)
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(percent_salary_hike)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, percent_salary_hike)
+```
+
+- La mayoría tuvo un aumento de hasta un 17% su salario anterior.
+
+```{r}
+dataset_p %>% 
+  count(performance_rating) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría tiene una performance de 3.
+
+```{r}
+dataset_p %>% 
+  count(relationship_satisfaction) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría tiene un nivel de satisfacción aceptable (3 a 4)
+
+```{r}
+dataset_p %>% 
+  count(stock_option_level) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría tiene un nivel de opciones de stock bajo (0 a 1)
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(total_working_years)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, total_working_years)
+
+```
+
+- Se tiene un promedio de 10.7 años de trabajo por empleado
+- El 50% de empleados tiene hasta 9 años laborando.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(training_times_last_year)) + 
+  geom_histogram()
+```
+
+- La mayoría tiene entre 3 y 4 años de practicas.
+
+```{r}
+dataset_p %>% 
+  count(work_life_balance) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría tiene un buen indicador de balance de vida (3) (65%)
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_at_company)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, years_at_company)
+```
+
+- El 50% de trabajadores tiene hasta 5 años de trabajo en la empresa.
+- EL promedio de años trabajando en la empresa por trabajador es de 6.81 años.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_in_current_role)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, years_in_current_role)
+```
+
+- El 50% de trabajadores tiene hasta 3 años de trabajo en su rol actual.
+- Existen personas con hasta 18 años de trabajo en su rol actual.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_since_last_promotion)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, years_since_last_promotion)
+```
+
+- El 50% de trabajadores solo ha pasado hasta 1 año desde su último ascenso.
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_with_curr_manager)) + 
+  geom_histogram()
+
+skimr::skim(dataset_p, years_with_curr_manager)
+```
+
+- El 50% de trabajadores tiene hasta 3 años con su actual gerente.
+
+```{r}
+dataset_p %>% 
+  count(attrition) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- La mayoría de trabajadores no ha fugado (88%)
+- Es natural que una minoría fugue, sin embargo represnta cierto nivel de desbalance de clases.
+
+### Análisis Bivariado
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(age, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(daily_rate, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(distance_from_home, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(hourly_rate, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(monthly_income, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(monthly_rate, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(percent_salary_hike, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(num_companies_worked, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(total_working_years, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(training_times_last_year, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_at_company, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_in_current_role, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_since_last_promotion, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_with_curr_manager, fill = attrition)) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+```
+
+```{r}
+dataset_p %>% 
+  select(all_of(variables_numericas)) %>% 
+  # select(-years_with_curr_manager, 
+  #        -years_since_last_promotion, 
+  #        -years_in_current_role, 
+  #        -total_working_years) %>% 
+  cor(method = "spearman") %>% 
+  as.data.frame() %>% 
+  rownames_to_column("V1") %>% 
+  pivot_longer(cols = -V1, 
+               names_to = "V2", 
+               values_to = "cor") %>% 
+  ggplot(aes(V1, V2, fill = cor)) + 
+  geom_tile() + 
+  geom_text(aes(label = round(cor, 2))) + 
+  labs(title = "Matriz de Correlación de Spearman", 
+       fill = "Correlación\n(Spearman)") + 
+  scale_fill_gradient2(low = "steelblue", 
+                       mid = "white", 
+                       high = "firebrick", 
+                       limits = c(-1, 1)) + 
+  theme(axis.text.x = element_text(angle = 45), 
+        axis.title = element_blank(), 
+        legend.position = "right")
+```
+
+```{r}
+dataset_p %>% 
+  ggplot(aes(years_with_curr_manager, years_in_current_role)) + 
+  geom_jitter(width = 1)
+
+dataset_p %>% 
+  ggplot(aes(years_with_curr_manager, years_in_current_role)) + 
+  geom_hex()
+```
+
+### Análisis multivariado
+
+```{r}
+dataset_p_scale <- dataset_p %>% 
+  select(all_of(variables_numericas)) %>% 
+  select(age, distance_from_home, daily_rate, monthly_income, years_at_company) %>% 
+  # select(-years_with_curr_manager, 
+  #        -years_since_last_promotion, 
+  #        -years_in_current_role, 
+  #        -total_working_years) %>% 
+  mutate_if(is.numeric, ~ scale(.)[, 1])
+
+matriz_distancia <- dist(dataset_p_scale)
+
+cluster_jerarquico <- hclust(matriz_distancia, method = "ward.D2")
+plot(cluster_jerarquico)
+
+fviz_cluster(object = list(data = dataset_p_scale, 
+                           cluster = cutree(cluster_jerarquico, k = 2)), 
+             ellipse.type = "convex", repel = FALSE, show.clust.cent = FALSE, 
+             labelsize = 0) + 
+  theme_light() + 
+  theme(legend.position = "bottom")
+```
+
+```{r}
+
+```
+
+
+

@@ -1,0 +1,239 @@
+---
+title: "PSS3E4: MODELAMIENTO V1 (BASELINE)"
+format: html
+---
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+library(tidymodels)
+library(bonsai)
+library(vip)
+
+theme_set(theme_light())
+```
+
+## CARGANDO DATA
+
+```{r}
+dataset <- read_csv("DATA/train.csv")
+dataset_test <- read_csv("DATA/test.csv")
+submit <- read_csv("DATA/sample_submission.csv")
+```
+
+TODO (PARA VERSION 2)
+
+- INCLUIR VARIABLES DE MEDIA, MEDIANA, PERCENTILES, MIN, MAX, SD, etc
+
+## META - ANÁLISIS
+
+```{r}
+df_status(dataset, print_results = FALSE)
+df_status(dataset_test, print_results = FALSE)
+
+```
+
+- En general se aprecia que se tiene un desbalanceo importante en la target.
+- Sin problemas de missings.
+
+## PREPARACIÓN DE DATOS PARA MODELAMIENTO
+
+```{r}
+set.seed(42)
+dataset_p <- dataset %>% 
+  janitor::clean_names() %>% 
+  mutate(class = factor(class, levels = c(1, 0), labels = c(1, 0)), 
+         amount = scale(amount)[,1], 
+         time = scale(time)[,1])
+
+test_p <- dataset_test %>% 
+  janitor::clean_names() %>% 
+  mutate(amount = scale(amount)[,1], 
+         time = scale(time)[,1])
+
+particion_inicial <- initial_split(dataset_p, prop = 0.8, pool = class)
+dfTrain <- training(particion_inicial)
+dfTest <- testing(particion_inicial)
+
+```
+
+## MODELAMIENTO
+
+```{r}
+formula <- glue::glue("class ~ {dfTrain %>% 
+  select(time, contains('v'), amount) %>% 
+  colnames() %>% 
+  paste(collapse = ' + ')}") %>% 
+  as.formula()
+```
+
+### Random Forest
+
+```{r}
+rf_spec <- rand_forest() %>% 
+  set_engine("ranger", 
+             num.threads = 6, 
+             verbose = TRUE, 
+             seed = 42, 
+             importance = "impurity") %>% 
+  set_mode("classification")
+
+rf_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(rf_spec)
+
+rf_fit <- rf_wf %>% 
+  fit(dfTrain)
+
+rf_fit %>% 
+  extract_fit_engine() %>% 
+  vip(num_features = 52)
+```
+
+```{r}
+dfPredictRf <- rf_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$class)
+
+caret::confusionMatrix(dfPredict$.pred_class, dfPredict$real)
+
+dfPredictProbRf <- rf_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$class)
+
+roc_auc(dfPredictProbRf, real, .pred_1)
+
+roc_curve(dfPredictProbRf, real, .pred_1) %>% 
+  autoplot()
+
+```
+
+### XGBoost
+
+```{r}
+set.seed(42)
+xgb_spec <- boost_tree(trees = 1000, 
+                       learn_rate = 0.01) %>% 
+  set_engine("xgboost", 
+             verbose = 2, 
+             nthread = 6) %>% 
+  set_mode("classification")
+
+xgb_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(xgb_spec)
+
+xgb_fit <- xgb_wf %>% 
+  fit(dfTrain)
+
+xgb_fit %>% 
+  extract_fit_engine() %>% 
+  vip(num_features = 52)
+```
+
+```{r}
+dfPredictXgb <- xgb_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$class)
+
+caret::confusionMatrix(dfPredictXgb$.pred_class, dfPredictXgb$real)
+
+dfPredictProbXgb <- xgb_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$class)
+
+roc_auc(dfPredictProbXgb, real, .pred_1)
+
+roc_curve(dfPredictProbXgb, real, .pred_1) %>% 
+  autoplot()
+```
+
+### LightGBM
+
+```{r}
+lgbm_spec <- boost_tree(trees = 1000, 
+                        learn_rate = 0.01) %>% 
+  set_engine("lightgbm", 
+             verbose = 1L, 
+             seed = 42, 
+             num_threads = 6) %>% 
+  set_mode("classification")
+
+lgbm_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(lgbm_spec)
+
+lgbm_fit <- lgbm_wf %>% 
+  fit(dfTrain)
+```
+
+```{r}
+dfPredictLgbm <- lgbm_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$class)
+
+caret::confusionMatrix(dfPredictLgbm$.pred_class, dfPredictLgbm$real)
+
+dfPredictProbLgbm <- lgbm_fit %>% 
+  predict(dfTest, type = "prob") %>% 
+  mutate(real = dfTest$class)
+
+roc_auc(dfPredictProbLgbm, real, .pred_1)
+
+roc_curve(dfPredictProbLgbm, real, .pred_1) %>% 
+  autoplot()
+```
+
+## SUBMIT
+
+```{r}
+## Random Forest
+pre_submit_rf <- rf_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  transmute(id = test_p$id, 
+            Class = .pred_1)
+
+submit %>% 
+  select(-Class) %>% 
+  left_join(pre_submit_rf, by = c("id" = "id")) %>% 
+  write_csv("OUTPUTS/SUBMIT_RF_V1.csv")
+
+## XGBoost
+pre_submit_xgb <- xgb_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  transmute(id = test_p$id, 
+            Class = .pred_1)
+
+submit %>% 
+  select(-Class) %>% 
+  left_join(pre_submit_xgb, by = c("id" = "id")) %>% 
+  write_csv("OUTPUTS/SUBMIT_XGB_V1.csv")
+
+
+## LightGBM
+pre_submit_lgbm <- lgbm_fit %>% 
+  predict(test_p, type = "prob") %>% 
+  transmute(id = test_p$id, 
+            Class = .pred_1)
+
+submit %>% 
+  select(-Class) %>% 
+  left_join(pre_submit_lgbm, by = c("id" = "id")) %>% 
+  write_csv("OUTPUTS/SUBMIT_LGBM_V1.csv")
+
+
+
+
+```
+
+
+
+
+
+
+
+

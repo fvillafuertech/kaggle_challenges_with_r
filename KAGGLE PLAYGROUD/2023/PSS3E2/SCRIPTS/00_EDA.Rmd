@@ -1,0 +1,388 @@
+---
+title: "KPS: S3E2"
+output: html_document
+date: "2023-01-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+
+theme_set(theme_light() + 
+            theme(legend.position = "bottom"))
+```
+
+## FUNCIONES
+
+```{r}
+bi_col <- function(data, variable_1, variable_2){
+  data %>% 
+    count({{variable_1}}, {{variable_2}}) %>% 
+    group_by({{variable_1}}) %>% 
+    mutate(prop = n/sum(n), 
+           text = percent(prop)) %>% 
+    ungroup() %>% 
+    ggplot(aes(as.character({{variable_1}}), 
+               prop, 
+               fill = as.character({{variable_2}}))) + 
+    geom_col() + 
+    geom_text(aes(label = text), 
+              position = position_stack(vjust = 0.5))
+}
+```
+
+
+## CARGANDO DATOS
+
+```{r}
+dfTrain <- read_csv("DATA/train.csv")
+dfTest <- read_csv("DATA/test.csv")
+dfSubmission <- read_csv("DATA/sample_submission.csv")
+```
+
+- DICCIONARIO: 
+1) id: unique identifier
+2) gender: "Male", "Female" or "Other"
+3) age: age of the patient
+4) hypertension: 0 if the patient doesn't have hypertension, 1 if the patient has hypertension
+5) heart_disease: 0 if the patient doesn't have any heart diseases, 1 if the patient has a heart disease
+6) ever_married: "No" or "Yes"
+7) work_type: "children", "Govt_jov", "Never_worked", "Private" or "Self-employed"
+8) Residence_type: "Rural" or "Urban"
+9) avg_glucose_level: average glucose level in blood
+10) bmi: body mass index
+11) smoking_status: "formerly smoked", "never smoked", "smokes" or "Unknown"*
+12) stroke: 1 if the patient had a stroke or 0 if not
+
+## META - ANÁLISIS
+
+```{r}
+df_status(dfTrain, print_results = FALSE)
+df_status(dfTest, print_results = FALSE)
+```
+
+## ANÁLISIS EXPLORATORIO DE DATOS
+
+### Análisis Univariado
+
+```{r}
+dfTrain %>% 
+  count(gender, sort = TRUE) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+```
+
+- La mayoría de pacientes pertenecen al género femenino (62%)
+- Se destaca 1 individuo con un género diferente al binario.
+
+```{r}
+dfTrain %>% 
+  mutate(age = round(age)) %>% 
+  ggplot(aes(age)) + 
+  geom_histogram(bins = 80)
+
+dfTrain %>% 
+  mutate(age = round(age)) %>% 
+  summarise(across(any_of("age"), 
+                   list(mean = mean, 
+                        sd = sd, 
+                        median = median, 
+                        min = min, 
+                        max = max)))
+```
+
+- Se observa que la información de edad posee decimales, se está redondeando en el análisis y no muestra variación respecto a estadísticos resumen.
+
+```{r}
+dfTrain %>% 
+  count(hypertension) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+```
+
+- Mayoría de personas sin hipertensión (95%)
+
+```{r}
+dfTrain %>% 
+  count(heart_disease) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+```
+
+- Mayoría de personas sin enfermedades del corazón (98%)
+
+```{r}
+dfTrain %>% 
+  count(ever_married) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+```
+
+- Mayoría de personas casadas (68%)
+
+```{r}
+dfTrain %>% 
+  count(work_type, sort = TRUE) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+```
+
+- La mayoría de personas tiene un trabajo privado (63.72%)
+- Gran minoría que no trabaja (0.27%)
+
+```{r}
+dfTrain %>% 
+  count(Residence_type, sort = TRUE) %>% 
+  mutate(prop = n/sum(n))
+```
+
+- Mitad vive en zona rural y otra mitad vive en zona urbana.
+
+```{r}
+dfTrain %>% 
+  ggplot(aes(avg_glucose_level)) + 
+  geom_histogram() + 
+  geom_vline(aes(xintercept = mean(avg_glucose_level)), col = "firebrick", lty = 2) + 
+  geom_vline(aes(xintercept = median(avg_glucose_level)), col = "steelblue", lty = 3) + 
+  labs(subtitle = "Histograma de Distribución del Promedio de Niveles de Glucosa de Pacientes", 
+       x = "Promedio de Niveles de Glucosa", 
+       y = "Recuento") + 
+  scale_y_continuous(labels = comma_format())
+
+dfTrain %>% 
+  select(avg_glucose_level) %>% 
+  skimr::skim()
+```
+
+- Los niveles promedio de glucosa tienden en mayoría estar por debajo de 100.
+- Existen niveles promedio atípicos por encima de 125.
+- Queda verificar si posiblemente sea un disparador de los accidentes cerebrovasculares (strokes)
+
+```{r}
+dfTrain %>% 
+  ggplot(aes(bmi)) + 
+  geom_histogram() + 
+  geom_vline(aes(xintercept = mean(bmi)), 
+             col = "firebrick", 
+             lty = 2) + 
+  geom_vline(aes(xintercept = median(bmi)), 
+             col = "steelblue", 
+             lty = 3) + 
+  labs(subtitle = "Distribución del Índice de Masa Corporal", 
+       x = "IMC", 
+       y = "Recuento") + 
+  scale_y_continuous(labels = comma_format())
+
+dfTrain %>% 
+  skimr::skim(bmi)
+```
+
+- El IMC promedio es de 28.1 unidades, sin distar mucho de la mediana.
+- Medidas ligeramente asimétricas.
+
+```{r}
+dfTrain %>% 
+  count(smoking_status, sort = TRUE) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+```
+
+- Porcentaje regular de personas que no han declarado hábitos de fumar (29.7%)
+- Un gran porcentaje, nunca ha fumado (41%)
+
+```{r}
+dfTrain %>% 
+  count(stroke, sort = TRUE) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+```
+
+- Minoría con accidentes cerebrovasculares (4%)
+- Desbalanceo de datos, intentar tratar con parámetros en boosting o mejorar con feature engineering.
+
+### Análisis Bivariado
+
+```{r}
+dfTrain %>% 
+  count(hypertension, stroke) %>% 
+  group_by(hypertension) %>% 
+  mutate(prop = n/sum(n), 
+         text = percent(prop))
+
+dfTrain %>% 
+  bi_col(hypertension, stroke) + 
+  labs(subtitle = "Proporción de Pacientes con Accidentes Cerebrovasculares según tenencia de Hipertensión", 
+       x = "Tenencia de Hipertensión", 
+       y = "% de pacientes", 
+       fill = "Stroke") + 
+  scale_x_discrete(labels = c("No", "Sí")) + 
+  scale_y_continuous(labels = percent_format()) + 
+  scale_fill_discrete(labels = c("No", "Sí"))
+```
+
+- Se ve un ligero incremento en el número de pacientes con Stroke en aquellos que tienen hipertensión
+
+```{r}
+dfTrain %>% 
+  bi_col(gender, stroke) + 
+  labs(subtitle = "Proporción de Pacientes con Accidentes Cerebrovasculares según Género", 
+       x = "Género", 
+       y = "% de pacientes", 
+       fill = "Stroke") + 
+  scale_fill_discrete(labels = c("No", "Sí"))
+```
+
+- Se aprecia que entre varones y mujeres no existe una diferencia marcada entre aquellos que tienen y no tienen accidentes cerebrovasculares.
+
+```{r}
+dfTrain %>% 
+  bi_col(heart_disease, stroke) + 
+  labs(subtitle = "Proporción de Pacientes con Accidentes Cerebrovasculares según tenencia de Enfermedad del Corazón", 
+       x = "Tenencia de Enfermedad del Corazón", 
+       y = "% de pacientes", 
+       fill = "Stroke") + 
+  scale_x_discrete(labels = c("No", "Sí")) + 
+  scale_y_continuous(labels = percent_format()) + 
+  scale_fill_discrete(labels = c("No", "Sí"))
+```
+
+- Similar al caso de hipertensión, presenta un incremento de caso de Stroke en pacientes que tienen enfermedad al corazón.
+
+```{r}
+dfTrain %>% 
+  bi_col(ever_married, stroke) + 
+  labs(subtitle = "Proporción de Pacientes con Accidentes Cerebrovasculares según Estado Matrimonial", 
+       x = "¿Alguna vez se ha casado?", 
+       y = "% de pacientes", 
+       fill = "Stroke")
+```
+
+- Ligero incremento de % de pacientes con Stroke en aquellos que se han casado alguna vez.
+
+```{r}
+dfTrain %>% 
+  bi_col(work_type, stroke) + 
+  labs(subtitle = "Proporción de Pacientes con Accidentes Cerebrovasculares según Tipo de Trabajo", 
+       x = "Tipo de Trabajo", 
+       y = "% de pacientes", 
+       fill = "Stroke")
+```
+
+- Se puede apreciar en general que del total de personas que trabajan del 5% al 8% padecen infartos cerebrales.
+
+```{r}
+dfTrain %>% 
+  bi_col(Residence_type, stroke) + 
+  labs(subtitle = "Proporción de Pacientes con Accidentes Cerebrovasculares según Tipo de Residencia", 
+       x = "Tipo de Residencia", 
+       y = "% de pacientes", 
+       fill = "Stroke")
+```
+
+- Aparentemente no evidencia diferencia significativa entre pacientes que poseen y no poseen Stroke entre los que viven en zona rural y zona urbana.
+
+```{r}
+dfTrain %>% 
+  bi_col(smoking_status, stroke) + 
+  labs(subtitle = "Proporción de Pacientes con Accidentes Cerebrovasculares según Hábito de Fumar", 
+       x = "Hábito de Fumar", 
+       y = "% de pacientes", 
+       fill = "Stroke")
+```
+
+- Diferencias muy pequeñas entre aquellos que fuman y no fuman.
+
+```{r}
+dfTrain %>% 
+  ggplot(aes(age, fill = as.character(stroke))) + 
+  geom_histogram(position = "identity", alpha = 0.7) + 
+  labs(subtitle = "Distribución de Edad de Pacientes según Tenencia de Accidente Cerebrovascular",
+       x = "Edad", 
+       y = "Recuento", 
+       fill = "Stroke") + 
+  scale_fill_discrete(labels = c("no", "sí"))
+
+dfTrain %>% 
+  ggplot(aes(age, as.character(stroke), 
+             fill = as.character(stroke), 
+             col = as.character(stroke))) + 
+  geom_boxplot(alpha = 0.6) + 
+  scale_fill_discrete(name = "Stroke",
+                      labels = c("No", "Sí")) + 
+  scale_color_discrete(name = "Stroke",
+                      labels = c("No", "Sí")) + 
+  scale_y_discrete(labels = c("No", "Sí")) + 
+  labs(subtitle = "Distribución de Edad de Pacientes según Tenencia de Accidente Cerebrovascular",
+       x = "Edad", 
+       y = "Accidente Cerebrovascular", 
+       fill = "Stroke",
+       color = "Stroke")
+
+```
+
+- Se aprecia una clara tendencia a tener un accidente cerebrovascular a medida que más edad tenga el paciente.
+
+```{r}
+dfTrain %>% 
+  ggplot(aes(avg_glucose_level, fill = as.character(stroke))) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7) + 
+  labs(subtitle = "Distriución del Promedio de Niveles de Glucosa según tenencia de Accidente Cerebrovascular", 
+       x = "Niveles Promedio de Glucosa", 
+       y = "Recuento", 
+       fill = "Stroke") + 
+  scale_y_continuous(labels = comma_format()) + 
+  scale_fill_discrete(labels = c("No", "Sí"))
+
+dfTrain %>% 
+  ggplot(aes(avg_glucose_level, 
+             y = as.character(stroke), 
+             fill = as.character(stroke), 
+             color = as.character(stroke))) + 
+  geom_boxplot(alpha = 0.6) + 
+  labs(title = "Distriución del Promedio de Niveles de Glucosa según tenencia de Accidente Cerebrovascular", 
+       subtitle = "Diagrama de Cajas y Bigotes", 
+       x = "Niveles Promedio de Glucosa", 
+       y = "Recuento", 
+       fill = "Stroke", 
+       color = "Stroke") + 
+  scale_color_discrete(labels = c("No", "Sí")) + 
+  scale_fill_discrete(labels = c("No", "Sí"))
+```
+
+- Los niveles promedio de glucosa son ligeramente más elevados en aquellas personas que padecieron accidente cerebrovascular.
+
+```{r}
+dfTrain %>% 
+  ggplot(aes(bmi, fill = as.character(stroke))) + 
+  geom_histogram(position = "identity", 
+                 alpha = 0.7)
+
+
+dfTrain %>% 
+  ggplot(aes(bmi, 
+             y = as.character(stroke), 
+             fill = as.character(stroke), 
+             color = as.character(stroke))) + 
+  geom_boxplot(alpha = 0.6) + 
+  labs(title = "Distriución del Índice de Masa Muscular según tenencia de Accidente Cerebrovascular", 
+       subtitle = "Diagrama de Cajas y Bigotes", 
+       x = "Índice de Masa Muscular", 
+       y = "Recuento", 
+       fill = "Stroke", 
+       color = "Stroke") + 
+  scale_color_discrete(labels = c("No", "Sí")) + 
+  scale_fill_discrete(labels = c("No", "Sí"))
+```
+
+- Se apreciar que el índice de masa muscular de los pacientes que padecieron accidente cerebrovascular son ligeramente más elevados que aquellos que no padecieron dicha enfermedad.
+
+
