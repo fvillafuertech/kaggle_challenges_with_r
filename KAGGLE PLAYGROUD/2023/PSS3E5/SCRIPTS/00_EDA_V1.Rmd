@@ -1,0 +1,130 @@
+---
+title: "EDA"
+date: "2023-02-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+library(patchwork)
+
+theme_set(theme_light() + 
+            theme(legend.position = "bottom"))
+```
+
+## CARGANDO DATOS
+
+```{r}
+setwd(rstudioapi::getSourceEditorContext()$path %>% dirname())
+dataset <- read_csv("../DATA/train.csv")
+dataset_test <- read_csv("../DATA/test.csv")
+submit <- read_csv("../DATA/sample_submission.csv")
+```
+
+## META ANÁLISIS
+
+```{r}
+dfStatusData <- df_status(dataset, print_results = FALSE)
+```
+
+- No presenta missing en ninguno de los campos
+
+## PREPARACIÓN DE DATOS
+
+```{r}
+dataset_p <- dataset %>% 
+  janitor::clean_names() %>% 
+  select(-id)
+
+dataset_test_p <- dataset %>% 
+  janitor::clean_names()
+
+variables_numericas <- df_status(dataset_p, print_results = FALSE) %>% 
+  filter(variable != "quality") %>% 
+  pull(variable)
+
+target <- "quality"
+```
+
+## ANÁLISIS DE DATOS
+
+```{r}
+dataset_p %>% 
+  skimr::skim()
+
+lista_histogramas <- list()
+
+for(i in 1:length(variables_numericas)){
+  lista_histogramas[[i]] <- dataset_p %>% 
+    ggplot(aes(!!rlang::sym(variables_numericas[i]))) + 
+    geom_histogram()
+}
+
+lista_histogramas %>% 
+  wrap_plots() + 
+  patchwork::plot_annotation(title = "Matriz de Histogramas")
+
+```
+
+- Haciendo una comparación con la distribución publicada en la página de Kaggle de las variables númericas con las del dataset original, tenemos que no hay datos fuera de un rango normal.
+
+- El 50% de los vinos testeados tienen una acidez fija de hasta 7.95.
+- El 50% de los vinos testeados tienen una acidez volátil de hasta 0.52.
+- El nivel de ácido cítrico promedio es de 0.265.
+- El 50% de los vinos testeados tienen azúcar residual de 2.2gr.
+- El 50% de los vinos testeados tienen nivel de clorido hasta de 0.079.
+- El 50% de los vinos están libre de dióxido de azufre en 16ptos.
+- El 50% de los vinos están libres de dióxido de azufre total en 44ptos.
+- La densidad promedio de los vinos es de 0.997.
+- El Ph promedio de los vinos es de 3.31.
+- Los niveles de sulfato del 50% de los vinos es de hasta 0.61.
+- El nivel de alcohol del 50% de los vinos es de 10.1
+
+Al no tener todos una distribución normal, se procede a aplicar correlación Spearman.
+
+```{r}
+dataset_p %>% 
+  cor(method = "spearman") %>% 
+  as.data.frame() %>% 
+  rownames_to_column("V1") %>% 
+  pivot_longer(cols = -V1, 
+               names_to = "V2", 
+               values_to = "cor") %>% 
+  ggplot(aes(V1, V2, fill = cor)) + 
+  geom_tile() + 
+  geom_text(aes(label = round(cor, 2))) + 
+  labs(title = "Matriz de Correlación Spearman") + 
+  scale_fill_gradient2(name = "Correlación Spearman", 
+                       low = "steelblue", 
+                       mid = "white", 
+                       high = "firebrick", 
+                       limits = c(-1, 1)) + 
+  theme(panel.border = element_blank(), 
+        panel.grid = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.title = element_blank())
+  
+```
+
+Existen fuertes correlaciones y directas e inversas entre:
+- Acidez volátil y ácido cítrico (-0.65)
+- Ácido cítrico y Ph (0.55)
+- Ácido cítrico y acidez fija (0.68)
+- Densidad y acidez fija (0.57)
+- Acidez fija y Ph (-0.71)
+- Dióxido de sulfuro total y dióxido de sulfuro libre (0.77)
+- Calidad con nivel de alcohol (0.5)
+
+Es posible aplicar algunas técnicas para poder reducir algunas dimensiones pero esto lo veremos en otra versión del documento.
+
+
+

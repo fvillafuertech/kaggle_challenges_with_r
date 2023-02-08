@@ -1,0 +1,167 @@
+---
+title: "MODELO V1"
+output: html_document
+date: "2023-02-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## LIBRERÍAS
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(funModeling)
+library(patchwork)
+library(tidymodels)
+library(bonsai)
+library(vip)
+
+theme_set(theme_light() + 
+            theme(legend.position = "bottom"))
+```
+
+## CARGANDO DATOS
+
+```{r}
+setwd(rstudioapi::getSourceEditorContext()$path %>% dirname())
+dataset <- read_csv("../DATA/train.csv")
+dataset_test <- read_csv("../DATA/test.csv")
+submit <- read_csv("../DATA/sample_submission.csv")
+```
+
+## META ANÁLISIS
+
+```{r}
+dfStatusData <- df_status(dataset, print_results = FALSE)
+print(dfStatusData)
+```
+
+- No presenta missing en ninguno de los campos
+
+## PREPARACIÓN DE DATOS
+
+```{r}
+set.seed(2023)
+
+dataset_p <- dataset %>% 
+  janitor::clean_names() %>% 
+  select(-id) %>% 
+  mutate(quality = factor(as.character(quality), 
+                          levels = c(3, 4, 5, 6, 7, 8)))
+
+dataset_test_p <- dataset_test %>% 
+  janitor::clean_names()
+
+variables_numericas <- df_status(dataset_p, print_results = FALSE) %>% 
+  filter(variable != "quality") %>% 
+  pull(variable)
+
+target <- "quality"
+
+particion <- initial_split(dataset_p, prop = 0.8, pool = "quality")
+dfTrain <- training(particion)
+dfTest <- testing(particion)
+```
+
+## MODELAMIENTO (BASELINE)
+
+```{r}
+formula <- glue::glue("quality ~ {dfTrain %>% 
+  select(-quality) %>% 
+  colnames() %>% 
+  paste(collapse = ' + ')}") %>% 
+  as.formula()
+```
+
+### Random Forest
+
+```{r}
+rf_spec <- rand_forest() %>% 
+  set_engine("ranger", 
+             seed = 2023, 
+             num.threads = 6, 
+             importance = "impurity") %>% 
+  set_mode("classification")
+
+rf_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(rf_spec)
+
+rf_fit <- rf_wf %>% 
+  fit(dfTrain)
+```
+
+```{r}
+dfPredictRf <- rf_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$quality)
+
+caret::confusionMatrix(dfPredictRf$.pred_class, dfPredictRf$real)
+
+rf_fit %>% 
+  extract_fit_engine() %>% 
+  vip(num_features = 20)
+```
+
+### XGBoost
+
+```{r}
+set.seed(2023)
+xgb_spec <- boost_tree(trees = 1000, learn_rate = 0.01) %>% 
+  set_engine("xgboost", 
+             nthread = 6, 
+             verbose = 1L) %>% 
+  set_mode("classification")
+
+xgb_wf <- workflow() %>% 
+  add_formula(formula) %>% 
+  add_model(xgb_spec)
+
+xgb_fit <- xgb_wf %>% 
+  fit(dfTrain)
+```
+
+```{r}
+dfPredictXgb <- xgb_fit %>% 
+  predict(dfTest) %>% 
+  mutate(real = dfTest$quality)
+
+caret::confusionMatrix(dfPredictRf$.pred_class, dfPredictRf$real)
+
+xgb_fit %>% 
+  extract_fit_engine() %>% 
+  vip()
+```
+
+## SUBMIT
+
+```{r}
+dfPreSubRf <- rf_fit %>% 
+  predict(dataset_test_p) %>% 
+  mutate(Id = dataset_test_p$id) %>% 
+  select(Id, quality = .pred_class)
+
+submit %>% 
+  select(-quality) %>% 
+  left_join(dfPreSubRf, by = c("Id" = "Id")) %>% 
+  write_csv("../OUTPUTS/submit_rf_v1.csv")
+
+
+dfPreSubXgb <- xgb_fit %>% 
+  predict(dataset_test_p) %>% 
+  mutate(Id = dataset_test_p$id) %>% 
+  select(Id, quality = .pred_class)
+
+submit %>% 
+  select(-quality) %>% 
+  left_join(dfPreSubXgb, by = c("Id" = "Id")) %>% 
+  write_csv("../OUTPUTS/submit_xgb_v1.csv")
+
+
+
+```
+
